@@ -1,14 +1,14 @@
 //! User configuration, stored as JSON and shared with the CLI.
 
+use crate::clock::ClockTime;
 use crate::paths;
-use crate::schedule::{self, ClockTime};
 use serde::{Deserialize, Serialize};
 
-/// How the night light decides what to show.
+/// What the screen should do right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// Follow the warm/cool schedule.
+    /// Follow the schedule.
     #[default]
     Auto,
     /// Stay fully warm.
@@ -38,6 +38,28 @@ impl Mode {
     }
 }
 
+/// Where the automatic schedule's times come from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Schedule {
+    /// Fixed warm-up and cool-down times.
+    #[default]
+    Clock,
+    /// Warm up at sunset, cool down at sunrise.
+    Sun,
+}
+
+impl Schedule {
+    pub const ALL: [Schedule; 2] = [Schedule::Clock, Schedule::Sun];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Schedule::Clock => "Fixed times",
+            Schedule::Sun => "Sunset to sunrise",
+        }
+    }
+}
+
 /// A DDC/CI-capable monitor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Monitor {
@@ -55,10 +77,14 @@ fn default_enabled() -> bool {
 #[serde(default)]
 pub struct Config {
     pub mode: Mode,
-    /// Evening time ("HH:MM") when warming starts.
+    pub schedule: Schedule,
+    /// Fixed schedule: evening time ("HH:MM") when warming starts.
     pub warm_start: String,
-    /// Morning time ("HH:MM") when cooling back to normal starts.
+    /// Fixed schedule: morning time ("HH:MM") when cooling starts.
     pub cool_start: String,
+    /// Sun schedule location. `None` means "estimate from the time zone".
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     /// Length of each fade in minutes (0 = instant).
     pub fade_minutes: u32,
     /// Warmth at full night, 0–100.
@@ -70,8 +96,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Auto,
+            schedule: Schedule::Clock,
             warm_start: "21:00".into(),
             cool_start: "06:00".into(),
+            latitude: None,
+            longitude: None,
             fade_minutes: 60,
             strength: 50,
             monitors: Vec::new(),
@@ -115,12 +144,11 @@ impl Config {
         self.cool_start = t.to_string();
     }
 
-    /// Level the monitors should be at right now, considering the mode.
-    pub fn target_level(&self) -> u32 {
-        match self.mode {
-            Mode::Night => schedule::STEPS,
-            Mode::Day => 0,
-            Mode::Auto => schedule::level_now(self.warm_time(), self.cool_time(), self.fade_minutes),
-        }
+    /// Set a manual location, or `None` to estimate it from the time zone.
+    pub fn set_location(&mut self, location: Option<(f64, f64)>) {
+        (self.latitude, self.longitude) = match location {
+            Some((lat, lon)) => (Some(lat), Some(lon)),
+            None => (None, None),
+        };
     }
 }

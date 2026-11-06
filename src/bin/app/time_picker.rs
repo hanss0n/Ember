@@ -3,7 +3,7 @@
 use cosmic::iced::Alignment;
 use cosmic::widget;
 use cosmic::Element;
-use cosmic_nightlight::schedule::ClockTime;
+use cosmic_ember::clock::ClockTime;
 
 const MINUTE_STEP: u32 = 5;
 

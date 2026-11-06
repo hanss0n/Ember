@@ -1,9 +1,9 @@
 [package]
-name = "cosmic-nightlight"
+name = "cosmic-ember"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Night light for COSMIC using DDC/CI monitor color controls"
+description = "Ember: night light for COSMIC using DDC/CI monitor color controls"
 
 [dependencies]
 chrono = "0.4"
@@ -18,11 +18,11 @@ default-features = false
 features = ["applet", "applet-token", "tokio", "wayland", "winit", "multi-window", "dbus-config"]
 
 [[bin]]
-name = "cosmic-nightlight"
+name = "cosmic-ember"
 path = "src/bin/app/main.rs"
 
 [[bin]]
-name = "cosmic-applet-nightlight"
+name = "cosmic-applet-ember"
 path = "src/bin/applet/main.rs"
 
 [profile.release]

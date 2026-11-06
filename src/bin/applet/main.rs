@@ -1,4 +1,4 @@
-//! COSMIC panel applet: sun/moon icon with a quick mode switcher.
+//! Ember panel applet: sun/moon icon with a quick mode switcher.
 
 mod applet;
 mod popup;

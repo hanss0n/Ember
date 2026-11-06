@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""Ember: warm your monitors at night via DDC/CI.
+
+COSMIC doesn't expose gamma control, so this changes the monitors' own color
+settings with ddcutil. Settings live in ~/.config/ember/config.json (shared
+with the cosmic-ember app and panel applet). Times use the computer's local
+clock, so daylight saving time is handled by the system.
+
+Usage: ember [command]
+  apply            set colors for the current time and mode (run by the timer)
+  auto             follow the schedule (default mode)
+  night            stay fully warm until switched back
+  day              stay normal until switched back
+  status [--json]  show mode, schedule and warmth level
+  times            show today's fade times
+  preview [secs]   show full warmth for a few seconds (default 5), then revert
+  detect           list DDC/CI monitors as JSON and save them to the config
+  timer on|off     enable/disable the background systemd timer
+"""
+import datetime as dt
+import fcntl
+import json
+import math
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+STEPS = 10
+HOME = pathlib.Path.home()
+CONFIG_DIR = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CONFIG = CONFIG_DIR / "ember" / "config.json"
+LEGACY_CONFIG = CONFIG_DIR / "nightlight" / "config.json"
+RUNTIME = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+STATE = RUNTIME / "ember.state"
+LOCK = RUNTIME / "ember.lock"
+UNIT_DIR = CONFIG_DIR / "systemd" / "user"
+UNIT = "ember"
+
+DEFAULTS = {
+    "mode": "auto",            # auto | night | day
+    "schedule": "clock",       # clock | sun
+    "warm_start": "21:00",     # clock schedule: start warming
+    "cool_start": "06:00",     # clock schedule: start cooling back to normal
+    "latitude": None,          # sun schedule; None = estimate from time zone
+    "longitude": None,
+    "fade_minutes": 60,        # length of each fade
+    "strength": 50,            # 0-100 warmth at full night
+    "monitors": [],            # [{"bus": 3, "name": "...", "enabled": true}]
+}
+
+
+# ---------- config / state ----------
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    source = CONFIG if CONFIG.exists() else LEGACY_CONFIG
+    try:
+        cfg.update(json.loads(source.read_text()))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"warning: ignoring bad config {source}: {e}", file=sys.stderr)
+    return cfg
+
+
+def save_config(cfg):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(CONFIG)
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {}
+
+
+def write_state(data):
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(STATE)
+
+
+# ---------- location ----------
+
+def _tz_name():
+    try:
+        return os.path.realpath("/etc/localtime").split("/zoneinfo/", 1)[1]
+    except (IndexError, OSError):
+        return None
+
+
+def _parse_iso6709(coord):
+    """'+5920+01803' or '+592000+0180300' -> (lat, lon) in degrees."""
+    m = re.fullmatch(r"([+-]\d+)([+-]\d+)", coord)
+    if not m:
+        return None
+
+    def deg(s, deg_digits):
+        sign = -1 if s[0] == "-" else 1
+        d = s[1:]
+        parts = [d[:deg_digits], d[deg_digits:deg_digits + 2], d[deg_digits + 2:] or "0"]
+        return sign * (int(parts[0]) + int(parts[1]) / 60 + int(parts[2]) / 3600)
+
+    return deg(m.group(1), 2), deg(m.group(2), 3)
+
+
+def timezone_location():
+    """Approximate location of the system time zone's main city."""
+    tz = _tz_name()
+    if not tz:
+        return None
+    for table in ("zone.tab", "zone1970.tab"):
+        try:
+            for line in open(f"/usr/share/zoneinfo/{table}"):
+                cols = line.split("\t")
+                if len(cols) >= 3 and cols[2].strip() == tz:
+                    return _parse_iso6709(cols[1])
+        except OSError:
+            continue
+    return None
+
+
+def location(cfg):
+    """(lat, lon, source) where source is 'config', 'timezone' or None."""
+    if cfg.get("latitude") is not None and cfg.get("longitude") is not None:
+        return float(cfg["latitude"]), float(cfg["longitude"]), "config"
+    loc = timezone_location()
+    return (*loc, "timezone") if loc else (None, None, None)
+
+
+# ---------- sun ----------
+
+SUN_HORIZON = -0.833   # degrees; standard sunrise/sunset (refraction + disc)
+
+
+def sun_elevation(lat, lon, when_utc):
+    n = when_utc.timestamp() / 86400 + 2440587.5 - 2451545.0
+    L = math.radians((280.460 + 0.9856474 * n) % 360)
+    g = math.radians((357.528 + 0.9856003 * n) % 360)
+    lam = L + math.radians(1.915) * math.sin(g) + math.radians(0.020) * math.sin(2 * g)
+    eps = math.radians(23.439 - 0.0000004 * n)
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    gmst = (18.697374558 + 24.06570982441908 * n) % 24
+    ha = math.radians(gmst * 15 + lon) - ra
+    la = math.radians(lat)
+    return math.degrees(math.asin(math.sin(la) * math.sin(dec) +
+                                  math.cos(la) * math.cos(dec) * math.cos(ha)))
+
+
+def sun_times(lat, lon, day):
+    """(sunrise, sunset) as local 'HH:MM' for a date, or None if the sun
+    doesn't both rise and set that day (polar day/night)."""
+    start = dt.datetime.combine(day, dt.time(0)).astimezone()
+    rise = set_ = None
+    prev = None
+    for minute in range(0, 24 * 60 + 1):
+        t = start + dt.timedelta(minutes=minute)
+        up = sun_elevation(lat, lon, t.astimezone(dt.timezone.utc)) > SUN_HORIZON
+        if prev is not None and up != prev:
+            if up and rise is None:
+                rise = t
+            elif not up and set_ is None:
+                set_ = t
+        prev = up
+    if rise is None or set_ is None:
+        return None
+    return f"{rise:%H:%M}", f"{set_:%H:%M}"
+
+
+# ---------- schedule ----------
+
+def effective_schedule(cfg, day=None):
+    """The warm/cool times actually in use today, plus why."""
+    if cfg["schedule"] == "sun":
+        lat, lon, _ = location(cfg)
+        if lat is not None:
+            times = sun_times(lat, lon, day or dt.date.today())
+            if times:
+                sunrise, sunset = times
+                return {"warm_start": sunset, "cool_start": sunrise, "source": "sun"}
+            return {"warm_start": cfg["warm_start"], "cool_start": cfg["cool_start"],
+                    "source": "clock-polar"}
+        return {"warm_start": cfg["warm_start"], "cool_start": cfg["cool_start"],
+                "source": "clock-no-location"}
+    return {"warm_start": cfg["warm_start"], "cool_start": cfg["cool_start"], "source": "clock"}
+
+
+def _mins(hhmm):
+    h, m = map(int, hhmm.split(":"))
+    return h * 60 + m
+
+
+def scheduled_level(warm_start, cool_start, fade_minutes, t):
+    """0 = normal, STEPS = fully warm, at local time t."""
+    now = t.hour * 60 + t.minute
+    fade = max(int(fade_minutes), 0)
+    since_warm = (now - _mins(warm_start)) % 1440
+    since_cool = (now - _mins(cool_start)) % 1440
+    if since_cool < since_warm:            # last event was the morning cool-down
+        frac = 0.0 if fade == 0 else 1 - min(since_cool / fade, 1)
+    else:                                  # last event was the evening warm-up
+        frac = 1.0 if fade == 0 else min(since_warm / fade, 1)
+    return round(frac * STEPS)
+
+
+def target_level(cfg, now=None):
+    if cfg["mode"] == "night":
+        return STEPS
+    if cfg["mode"] == "day":
+        return 0
+    now = now or dt.datetime.now()
+    sched = effective_schedule(cfg, now.date())
+    return scheduled_level(sched["warm_start"], sched["cool_start"], cfg["fade_minutes"], now)
+
+
+def gains_for(cfg, level):
+    """Red/green/blue gains (VCP 16/18/1A). 50 = neutral."""
+    s = max(0, min(int(cfg["strength"]), 100)) / 100 * level / STEPS
+    return {"16": 50, "18": round(50 - 20 * s), "1A": round(50 - 50 * s)}
+
+
+# ---------- DDC ----------
+
+def ddc(bus, *args):
+    subprocess.run(["ddcutil", "--bus", str(bus), "--noverify", "setvcp", *args],
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def buses(cfg):
+    return [m["bus"] for m in cfg["monitors"] if m.get("enabled", True)]
+
+
+def write_level(cfg, level, prev):
+    for bus in buses(cfg):
+        if level == 0:
+            ddc(bus, "14", "0x05")                      # 6500 K factory preset
+        else:
+            if prev is None or prev <= 0:
+                ddc(bus, "14", "0x0b")                  # User 1
+            for code, val in gains_for(cfg, level).items():
+                ddc(bus, code, str(val))
+
+
+class locked:
+    def __enter__(self):
+        self.f = open(LOCK, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *a):
+        self.f.close()
+
+
+def apply(cfg, force=False):
+    with locked():
+        level = target_level(cfg)
+        st = load_state()
+        prev = st.get("level")
+        sig = {"strength": cfg["strength"], "buses": buses(cfg)}
+        if not force and prev == level and st.get("sig") == sig:
+            return
+        write_level(cfg, level, prev)
+        write_state({"level": level, "sig": sig})
+
+
+def preview(cfg, secs):
+    with locked():
+        write_level(cfg, STEPS, None)
+        write_state({"level": -1})                      # force re-apply afterwards
+    time.sleep(secs)
+    apply(load_config(), force=True)
+
+
+def detect(cfg):
+    out = subprocess.run(["ddcutil", "detect", "--brief"], capture_output=True, text=True).stdout
+    found = []
+    for block in out.split("\n\n"):
+        bus = re.search(r"/dev/i2c-(\d+)", block)
+        model = re.search(r"Monitor:\s+[^:\n]*:([^:\n]*):", block)
+        if bus and "Invalid display" not in block:
+            name = model.group(1).strip() if model else ""
+            found.append({"bus": int(bus.group(1)), "name": name or f"Bus {bus.group(1)}"})
+    old = {m["bus"]: m for m in cfg["monitors"]}
+    cfg["monitors"] = [{**f, "enabled": old.get(f["bus"], {}).get("enabled", True)} for f in found]
+    save_config(cfg)
+    print(json.dumps(cfg["monitors"]))
+
+
+# ---------- timer ----------
+
+SERVICE = f"""[Unit]
+Description=Ember: warm monitors at night via DDC/CI
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ember apply
+"""
+TIMER = """[Unit]
+Description=Ember schedule check
+
+[Timer]
+OnStartupSec=20s
+OnUnitActiveSec=3min
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def timer(on):
+    sc = ["systemctl", "--user"]
+    service, tmr = UNIT_DIR / f"{UNIT}.service", UNIT_DIR / f"{UNIT}.timer"
+    if on:
+        UNIT_DIR.mkdir(parents=True, exist_ok=True)
+        service.write_text(SERVICE)
+        tmr.write_text(TIMER)
+        subprocess.run(sc + ["daemon-reload"], check=True)
+        subprocess.run(sc + ["enable", "--now", f"{UNIT}.timer"], check=True)
+    else:
+        subprocess.run(sc + ["disable", "--now", f"{UNIT}.timer"], check=False)
+        service.unlink(missing_ok=True)
+        tmr.unlink(missing_ok=True)
+        subprocess.run(sc + ["daemon-reload"], check=False)
+
+
+# ---------- reporting ----------
+
+def status(cfg):
+    sched = effective_schedule(cfg)
+    lat, lon, loc_source = location(cfg)
+    applied = load_state().get("level")
+    return {
+        "mode": cfg["mode"],
+        "schedule": cfg["schedule"],
+        "steps": STEPS,
+        "target_level": target_level(cfg),
+        "applied_level": applied if isinstance(applied, int) and applied >= 0 else None,
+        "warm_start": sched["warm_start"],
+        "cool_start": sched["cool_start"],
+        "schedule_source": sched["source"],
+        "latitude": lat,
+        "longitude": lon,
+        "location_source": loc_source,
+    }
+
+
+def fade_times(cfg):
+    day = dt.date.today()
+    sched = effective_schedule(cfg, day)
+    t, prev, ev = dt.datetime.combine(day, dt.time(0)), None, []
+    while t.date() == day:
+        lv = scheduled_level(sched["warm_start"], sched["cool_start"], cfg["fade_minutes"], t)
+        if prev is not None and lv != prev:
+            if prev == 0: ev.append(f"{t:%H:%M} starts warming")
+            if lv == STEPS: ev.append(f"{t:%H:%M} fully warm")
+            if prev == STEPS: ev.append(f"{t:%H:%M} starts cooling")
+            if lv == 0: ev.append(f"{t:%H:%M} back to normal")
+        prev = lv
+        t += dt.timedelta(minutes=1)
+    return sorted(ev)
+
+
+def print_status(cfg):
+    s = status(cfg)
+    applied = s["applied_level"] if s["applied_level"] is not None else "unknown"
+    print(f"mode {s['mode']}, schedule {s['schedule']} "
+          f"({s['warm_start']} → {s['cool_start']}, {s['schedule_source']}), "
+          f"target level {s['target_level']}/{STEPS}, applied level {applied}")
+    if s["schedule"] == "sun" and s["latitude"] is not None:
+        print(f"location {s['latitude']:.2f}, {s['longitude']:.2f} (from {s['location_source']})")
+
+
+# ---------- main ----------
+
+def main():
+    args = sys.argv[1:] or ["apply"]
+    cmd = args[0]
+    cfg = load_config()
+    if cmd == "apply":
+        apply(cfg)
+    elif cmd in ("auto", "night", "day"):
+        cfg["mode"] = cmd
+        save_config(cfg)
+        apply(cfg)
+    elif cmd == "status":
+        if "--json" in args:
+            print(json.dumps(status(cfg)))
+        else:
+            print_status(cfg)
+    elif cmd == "times":
+        print("\n".join(fade_times(cfg)))
+    elif cmd == "preview":
+        preview(cfg, float(args[1]) if len(args) > 1 else 5)
+    elif cmd == "detect":
+        detect(cfg)
+    elif cmd == "timer" and len(args) > 1 and args[1] in ("on", "off"):
+        timer(args[1] == "on")
+    else:
+        print(__doc__)
+        sys.exit(0 if cmd in ("-h", "--help", "help") else 1)
+
+
+if __name__ == "__main__":
+    main()

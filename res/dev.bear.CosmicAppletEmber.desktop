@@ -1,12 +1,13 @@
 [Desktop Entry]
-Name=Night Light
-Comment=Shows whether night light is on and switches modes
+Name=Ember
+GenericName=Night Light
+Comment=Shows whether Ember is warming the screen and switches modes
 Type=Application
-Exec=cosmic-applet-nightlight
+Exec=cosmic-applet-ember
 Icon=weather-clear-night-symbolic
 Terminal=false
 Categories=COSMIC;
-Keywords=COSMIC;Applet;Night;Light;
+Keywords=COSMIC;Applet;Night;Light;Ember;
 NoDisplay=true
 X-CosmicApplet=true
 X-HostWaylandDisplay=true

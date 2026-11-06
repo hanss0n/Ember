@@ -1,10 +1,11 @@
 [Desktop Entry]
-Name=Night Light
+Name=Ember
+GenericName=Night Light
 Comment=Warm your monitors' colors in the evening
 Type=Application
-Exec=cosmic-nightlight
+Exec=cosmic-ember
 Icon=weather-clear-night-symbolic
 Terminal=false
 Categories=COSMIC;Settings;
-Keywords=night;light;blue;warm;color;temperature;redshift;
+Keywords=night;light;blue;warm;color;temperature;redshift;sunset;
 StartupNotify=true

@@ -2,19 +2,20 @@
 
 use crate::app::{App, Message};
 use crate::time_picker::time_picker;
+use cosmic::Element;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{self, settings};
-use cosmic::Element;
-use cosmic_nightlight::{Mode, status};
+use cosmic_ember::{Mode, Schedule};
 
 const MAX_WIDTH: f32 = 720.0;
 const FADE_STEP: u32 = 10;
 const FADE_MAX: u32 = 180;
+const COORD_INPUT_WIDTH: f32 = 110.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut sections: Vec<Element<'_, Message>> = Vec::with_capacity(7);
     if let Some(error) = &app.error {
-        sections.push(error_banner(error));
+        sections.push(widget::warning(error).on_close(Message::DismissError).into());
     }
     sections.extend([
         status_card(app),
@@ -32,18 +33,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn error_banner(error: &str) -> Element<'_, Message> {
-    widget::warning(error).on_close(Message::DismissError).into()
-}
-
 fn status_card(app: &App) -> Element<'_, Message> {
     let content = widget::row::with_capacity(2)
         .spacing(16)
         .align_y(Alignment::Center)
-        .push(widget::icon::from_name(status::icon_for(app.level)).size(40))
+        .push(widget::icon::from_name(app.status.icon()).size(40))
         .push(
             widget::column::with_capacity(2)
-                .push(widget::text::title4(status::describe(&app.config, app.level)))
+                .push(widget::text::title4(app.status.headline()))
                 .push(widget::text::caption(
                     "Warms your monitors' colors using their built-in DDC/CI controls.",
                 )),
@@ -75,39 +72,87 @@ fn mode_description(mode: Mode) -> &'static str {
 }
 
 fn schedule_section(app: &App) -> Element<'_, Message> {
-    let fade = app.config.fade_minutes;
-    settings::section()
-        .title("Schedule")
-        .add(
-            settings::item::builder("Warm up at")
-                .description("Evening time when the screen starts getting warmer")
-                .control(time_picker(app.config.warm_time(), Message::SetWarmStart)),
-        )
-        .add(
-            settings::item::builder("Cool down at")
-                .description("Morning time when normal colors start returning")
-                .control(time_picker(app.config.cool_time(), Message::SetCoolStart)),
-        )
-        .add(
-            settings::item::builder("Fade duration")
-                .description("How long each transition takes")
-                .control(widget::spin_button(
-                    fade_label(fade),
-                    fade,
-                    FADE_STEP,
-                    0,
-                    FADE_MAX,
-                    Message::SetFadeMinutes,
-                )),
-        )
-        .into()
+    let selected = Some(app.config.schedule);
+    let section = Schedule::ALL
+        .into_iter()
+        .fold(settings::section().title("Schedule"), |section, schedule| {
+            let item = settings::item::builder(schedule.label())
+                .description(schedule_description(app, schedule));
+            section.add(item.radio(schedule, selected, Message::SetSchedule))
+        });
+
+    let section = match app.config.schedule {
+        Schedule::Clock => section
+            .add(
+                settings::item::builder("Warm up at")
+                    .description("Evening time when the screen starts getting warmer")
+                    .control(time_picker(app.config.warm_time(), Message::SetWarmStart)),
+            )
+            .add(
+                settings::item::builder("Cool down at")
+                    .description("Morning time when normal colors start returning")
+                    .control(time_picker(app.config.cool_time(), Message::SetCoolStart)),
+            ),
+        Schedule::Sun => section.add(location_item(app)),
+    };
+
+    section.add(fade_item(app)).into()
 }
 
-fn fade_label(minutes: u32) -> String {
-    match minutes {
+fn schedule_description(app: &App, schedule: Schedule) -> String {
+    match schedule {
+        Schedule::Clock => format!("Every day from {} to {}", app.config.warm_start, app.config.cool_start),
+        Schedule::Sun if app.config.schedule == Schedule::Sun => app.status.schedule_summary(),
+        Schedule::Sun => "Follows the sun where you live".into(),
+    }
+}
+
+fn location_item(app: &App) -> Element<'_, Message> {
+    let estimated = |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_default();
+    let from_timezone = app.status.location_source.as_deref() == Some("timezone");
+    let (lat_hint, lon_hint) = if from_timezone {
+        (estimated(app.status.latitude), estimated(app.status.longitude))
+    } else {
+        ("Latitude".into(), "Longitude".into())
+    };
+
+    let coord_input = |placeholder: String, value: &str, valid: bool, on_input: fn(String) -> Message| {
+        let input = widget::text_input(placeholder, value.to_owned())
+            .on_input(on_input)
+            .width(Length::Fixed(COORD_INPUT_WIDTH));
+        if valid { input } else { input.error("Invalid") }
+    };
+
+    let mut controls = widget::row::with_capacity(3)
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(coord_input(lat_hint, &app.location.latitude, app.location.latitude_valid(), Message::LatitudeInput))
+        .push(coord_input(lon_hint, &app.location.longitude, app.location.longitude_valid(), Message::LongitudeInput));
+    if app.location.is_manual() {
+        controls = controls.push(
+            widget::button::text("Use time zone").on_press(Message::UseTimezoneLocation),
+        );
+    }
+
+    let description = if app.location.is_manual() {
+        "Latitude and longitude in decimal degrees"
+    } else {
+        "Estimated from your time zone. Type coordinates to be more precise"
+    };
+
+    settings::item::builder("Location").description(description).control(controls).into()
+}
+
+fn fade_item(app: &App) -> Element<'_, Message> {
+    let fade = app.config.fade_minutes;
+    let label = match fade {
         0 => "Instant".into(),
         m => format!("{m} min"),
-    }
+    };
+    settings::item::builder("Fade duration")
+        .description("How long each transition takes")
+        .control(widget::spin_button(label, fade, FADE_STEP, 0, FADE_MAX, Message::SetFadeMinutes))
+        .into()
 }
 
 fn warmth_section(app: &App) -> Element<'_, Message> {

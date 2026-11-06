@@ -983,6 +983,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmic-ember"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libcosmic",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cosmic-freedesktop-icons"
 version = "0.4.0"
 source = "git+https://github.com/pop-os/freedesktop-icons#ab4c57b8e416c6af9297cb04d101889896fd9a92"
@@ -1014,17 +1025,6 @@ dependencies = [
  "tracing",
  "which",
  "zbus 6.2.1",
-]
-
-[[package]]
-name = "cosmic-nightlight"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libcosmic",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

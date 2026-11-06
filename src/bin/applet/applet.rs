@@ -2,43 +2,45 @@
 
 use cosmic::app::{Core, Task};
 use cosmic::iced::window::Id;
-use cosmic::iced::{Rectangle, Subscription};
+use cosmic::iced::{Rectangle, Subscription, Vector};
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::{Action, Element, widget};
-use cosmic_nightlight::{Config, Mode, backend, status};
+use cosmic_ember::{Mode, Status, backend};
 use std::time::Duration;
 
-const APP_ID: &str = "dev.bear.CosmicAppletNightlight";
+const APP_ID: &str = "dev.bear.CosmicAppletEmber";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Applet {
     core: Core,
     popup: Option<Id>,
-    pub(crate) config: Config,
-    pub(crate) level: u32,
-    /// A mode change is running; skip refreshes so the UI doesn't flicker back.
+    pub(crate) status: Status,
+    /// A mode change is running; ignore refreshes so the UI doesn't flicker back.
     busy: bool,
 }
 
 #[derive(Clone, Debug)]
 pub enum Message {
     Refresh,
+    StatusLoaded(Result<Status, String>),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
     SetMode(Mode),
-    ModeApplied,
+    ModeApplied(Result<(), String>),
     OpenSettings,
 }
 
-impl Applet {
-    /// Re-read config and the level the CLI last applied.
-    fn refresh(&mut self) {
-        self.config = Config::load();
-        self.level = backend::applied_level().unwrap_or_else(|| self.config.target_level());
-    }
+/// Run a future and wrap its output in an applet message.
+fn perform<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+    to_message: impl FnOnce(T) -> Message + Send + 'static,
+) -> Task<Message> {
+    Task::perform(future, move |out| Action::App(to_message(out)))
+}
 
-    pub(crate) fn icon_name(&self) -> &'static str {
-        status::icon_for(self.level)
+impl Applet {
+    fn load_status() -> Task<Message> {
+        perform(backend::status(), Message::StatusLoaded)
     }
 
     fn close_popup(&mut self) -> Task<Message> {
@@ -49,11 +51,10 @@ impl Applet {
     }
 
     /// Build the surface action that opens the popup anchored to the panel button.
-    fn open_popup(bounds: Rectangle, offset: cosmic::iced::Vector) -> Message {
+    fn open_popup(bounds: Rectangle, offset: Vector) -> Message {
         Message::Surface(app_popup::<Applet>(
             |_| Default::default(),
             move |state: &mut Applet| {
-                state.refresh();
                 let id = Id::unique();
                 state.popup = Some(id);
                 let mut settings = state.core.applet.get_popup_settings(
@@ -94,9 +95,8 @@ impl cosmic::Application for Applet {
     }
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
-        let mut applet = Applet { core, popup: None, config: Config::default(), level: 0, busy: false };
-        applet.refresh();
-        (applet, Task::none())
+        let applet = Applet { core, popup: None, status: Status::default(), busy: false };
+        (applet, Self::load_status())
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -109,8 +109,11 @@ impl cosmic::Application for Applet {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Refresh if !self.busy => self.refresh(),
+            Message::Refresh if !self.busy => return Self::load_status(),
             Message::Refresh => {}
+            Message::StatusLoaded(Ok(status)) if !self.busy => self.status = status,
+            Message::StatusLoaded(Ok(_)) => {}
+            Message::StatusLoaded(Err(e)) => eprintln!("ember: {e}"),
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
@@ -118,19 +121,16 @@ impl cosmic::Application for Applet {
             }
             Message::Surface(action) => return cosmic::task::message(Action::Surface(action)),
             Message::SetMode(mode) => {
-                self.config.mode = mode;
-                self.level = self.config.target_level();
+                self.status.mode = mode;
                 self.busy = true;
-                return Task::perform(backend::set_mode(mode), |result| {
-                    if let Err(e) = result {
-                        eprintln!("nightlight: {e}");
-                    }
-                    Action::App(Message::ModeApplied)
-                });
+                return perform(backend::set_mode(mode), Message::ModeApplied);
             }
-            Message::ModeApplied => {
+            Message::ModeApplied(result) => {
+                if let Err(e) = result {
+                    eprintln!("ember: {e}");
+                }
                 self.busy = false;
-                self.refresh();
+                return Self::load_status();
             }
             Message::OpenSettings => {
                 backend::open_settings_app();
@@ -145,13 +145,13 @@ impl cosmic::Application for Applet {
         let button = self
             .core
             .applet
-            .icon_button(self.icon_name())
+            .icon_button(self.status.icon())
             .on_press_with_rectangle(move |offset, bounds| match popup {
                 Some(id) => Message::Surface(destroy_popup(id)),
                 None => Self::open_popup(bounds, offset),
             });
 
-        let tooltip = format!("Night Light: {}", status::describe(&self.config, self.level));
+        let tooltip = format!("Ember: {}", self.status.headline());
         self.core
             .applet
             .applet_tooltip::<Message>(button, tooltip, self.popup.is_some(), Message::Surface, None)

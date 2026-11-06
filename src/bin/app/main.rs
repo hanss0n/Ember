@@ -1,6 +1,7 @@
-//! Night Light settings app for COSMIC.
+//! Ember settings app for COSMIC.
 
 mod app;
+mod location;
 mod time_picker;
 mod view;
 

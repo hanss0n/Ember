@@ -1,16 +1,11 @@
-//! Talking to the `nightlight` CLI and systemd.
+//! Talking to the `ember` CLI and systemd.
 
 use crate::config::{Mode, Monitor};
 use crate::paths;
+use crate::status::Status;
 use tokio::process::Command;
 
-/// Level last written to the monitors by the CLI. `None` if unknown or mid-preview.
-pub fn applied_level() -> Option<u32> {
-    let text = std::fs::read_to_string(paths::state_file()).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let level = value.get("level")?.as_i64()?;
-    u32::try_from(level).ok()
-}
+const TIMER_UNIT: &str = "ember.timer";
 
 /// Run the CLI and return stdout, or stderr as the error.
 async fn run_cli(args: &[&str]) -> Result<String, String> {
@@ -18,12 +13,18 @@ async fn run_cli(args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .await
-        .map_err(|e| format!("could not run nightlight: {e}"))?;
+        .map_err(|e| format!("could not run ember: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
     }
+}
+
+/// Current mode, schedule and warmth level.
+pub async fn status() -> Result<Status, String> {
+    let out = run_cli(&["status", "--json"]).await?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("bad status output: {e}"))
 }
 
 /// Apply the saved config to the monitors.
@@ -55,7 +56,7 @@ pub async fn set_timer(enabled: bool) -> Result<(), String> {
 /// Whether the background systemd timer is enabled.
 pub async fn timer_enabled() -> bool {
     Command::new("systemctl")
-        .args(["--user", "is-enabled", "--quiet", "nightlight.timer"])
+        .args(["--user", "is-enabled", "--quiet", TIMER_UNIT])
         .status()
         .await
         .is_ok_and(|s| s.success())
@@ -63,7 +64,7 @@ pub async fn timer_enabled() -> bool {
 
 /// Launch the settings app.
 pub fn open_settings_app() {
-    if let Err(e) = std::process::Command::new(paths::local_bin("cosmic-nightlight")).spawn() {
-        eprintln!("could not launch cosmic-nightlight: {e}");
+    if let Err(e) = std::process::Command::new(paths::local_bin("cosmic-ember")).spawn() {
+        eprintln!("could not launch cosmic-ember: {e}");
     }
 }
