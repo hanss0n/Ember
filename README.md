@@ -132,4 +132,8 @@ just install       # build and install for your user
 
 Public domain, under [The Unlicense](LICENSE). Do whatever you like with it.
 
-Ember is built on [libcosmic](https://github.com/pop-os/libcosmic), which has its own license (MPL-2.0).
+The Unlicense covers the code in this repository. Ember's dependencies are not part of
+this repository; Cargo downloads them when you build, and they keep their own licenses.
+Notably, [libcosmic](https://github.com/pop-os/libcosmic) is MPL-2.0, and its panel applet
+support pulls in `cosmic-panel-config`, which is GPL-3.0. So a compiled Ember binary
+includes GPL-3.0 code, and anyone distributing such binaries should do so under the GPL-3.0.
