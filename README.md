@@ -127,3 +127,9 @@ just test          # run the tests
 just check         # lint with clippy
 just install       # build and install for your user
 ```
+
+## License
+
+Public domain, under [The Unlicense](LICENSE). Do whatever you like with it.
+
+Ember is built on [libcosmic](https://github.com/pop-os/libcosmic), which has its own license (MPL-2.0).

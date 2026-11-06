@@ -2,7 +2,8 @@
 name = "cosmic-ember"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Unlicense"
+repository = "https://github.com/hanss0n/Ember"
 description = "Ember: night light for COSMIC using DDC/CI monitor color controls"
 
 [dependencies]
