@@ -1,0 +1,29 @@
+[package]
+name = "cosmic-nightlight"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Night light for COSMIC using DDC/CI monitor color controls"
+
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "time"] }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "7cd76ae3160cbd26ae89a4c01e64eda21f648c7f"
+default-features = false
+features = ["applet", "applet-token", "tokio", "wayland", "winit", "multi-window", "dbus-config"]
+
+[[bin]]
+name = "cosmic-nightlight"
+path = "src/bin/app/main.rs"
+
+[[bin]]
+name = "cosmic-applet-nightlight"
+path = "src/bin/applet/main.rs"
+
+[profile.release]
+lto = "thin"

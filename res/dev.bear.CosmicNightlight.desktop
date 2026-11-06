@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Night Light
+Comment=Warm your monitors' colors in the evening
+Type=Application
+Exec=cosmic-nightlight
+Icon=weather-clear-night-symbolic
+Terminal=false
+Categories=COSMIC;Settings;
+Keywords=night;light;blue;warm;color;temperature;redshift;
+StartupNotify=true

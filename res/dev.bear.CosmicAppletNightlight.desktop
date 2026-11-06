@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Night Light
+Comment=Shows whether night light is on and switches modes
+Type=Application
+Exec=cosmic-applet-nightlight
+Icon=weather-clear-night-symbolic
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Night;Light;
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true
+X-CosmicHoverPopup=Auto
